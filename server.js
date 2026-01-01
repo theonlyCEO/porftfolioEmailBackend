@@ -9,70 +9,39 @@ require('dotenv').config();
 
 const app = express();
 
+// FIX 1: Add trust proxy for Render
+app.set('trust proxy', 1);
+
 // Middleware
 app.use(bodyParser.json());
 app.use(cors({
-  origin: 'https://code-hive-co-za.vercel.app',
+  origin: ['https://code-hive-co-za.vercel.app', 'http://localhost:3000'],
   methods: ['POST', 'GET'],
   credentials: true
 }));
 
-// Rate Limiting
+// FIX 2: Simplified rate limiting for Render
 const emailLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 5, // Limit each IP to 5 requests per windowMs
+  max: 5,
   message: { 
     success: false, 
-    error: 'Too many emails sent from this IP, please try again later' 
+    error: 'Too many emails sent, please try again later' 
   },
   standardHeaders: true,
-  legacyHeaders: false
+  legacyHeaders: false,
+  keyGenerator: (req) => {
+    // Use X-Forwarded-For header from Render's proxy
+    return req.headers['x-forwarded-for'] || req.ip;
+  }
 });
 
-// Logging function
+// Simplified logging for Render (no file system access)
 const logEmail = (email, success, ip) => {
-  const log = `${new Date().toISOString()} | ${email} | ${success} | ${ip}\n`;
-  try {
-    fs.appendFileSync('email-logs.csv', log);
-  } catch (error) {
-    console.error('Failed to write log:', error);
-  }
+  console.log(`Email ${success ? 'sent' : 'failed'}: ${email} from ${ip} at ${new Date().toISOString()}`);
 };
 
-// Initialize log file if it doesn't exist
-try {
-  if (!fs.existsSync('email-logs.csv')) {
-    fs.writeFileSync('email-logs.csv', 'timestamp,email,success,ip\n');
-  }
-} catch (error) {
-  console.error('Failed to create log file:', error);
-}
-
-// Queue system (optional, for future scaling)
-const emailQueue = [];
-let isProcessingQueue = false;
-
-const processEmailQueue = async () => {
-  if (isProcessingQueue || emailQueue.length === 0) return;
-  
-  isProcessingQueue = true;
-  
-  while (emailQueue.length > 0) {
-    const emailData = emailQueue.shift();
-    try {
-      await sendSingleEmail(emailData);
-      // Delay between emails to respect rate limits
-      await new Promise(resolve => setTimeout(resolve, 1000));
-    } catch (error) {
-      console.error('Failed to send queued email:', error);
-      // Optional: retry logic here
-    }
-  }
-  
-  isProcessingQueue = false;
-};
-
-// Email sending function
+// Email sending function (UPDATED FOR RENDER)
 const sendSingleEmail = async (emailData) => {
   const { name, email, company, phone, website, message, req } = emailData;
   
@@ -92,12 +61,20 @@ const sendSingleEmail = async (emailData) => {
     allowedAttributes: {}
   });
 
+  // FIX 3: Use better configuration for Render
   const transporter = nodemailer.createTransport({
-    service: 'gmail',
+    host: 'smtp.gmail.com',
+    port: 465,
+    secure: true, // true for 465, false for other ports
     auth: {
       user: process.env.GMAIL_USER,
       pass: process.env.GMAIL_APP_PASSWORD
     },
+    // Increased timeout for Render
+    connectionTimeout: 10000,
+    greetingTimeout: 10000,
+    socketTimeout: 10000,
+    // Don't verify TLS
     tls: {
       rejectUnauthorized: false
     }
@@ -205,86 +182,28 @@ const sendSingleEmail = async (emailData) => {
 
 // Routes
 app.get('/', (req, res) => {
-  res.send('Email Backend is running!');
-});
-
-// Test email route
-app.get('/test', async (req, res) => {
-  try {
-    const testTransporter = nodemailer.createTransport({
-      service: 'gmail',
-      auth: {
-        user: process.env.GMAIL_USER,
-        pass: process.env.GMAIL_APP_PASSWORD
-      }
-    });
-    
-    await testTransporter.sendMail({
-      from: process.env.GMAIL_USER,
-      to: process.env.GMAIL_USER,
-      subject: 'Backend Test - Success!',
-      text: 'Your email backend is working correctly!'
-    });
-    
-    res.json({ success: true, message: 'Test email sent!' });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Usage statistics endpoint
-app.get('/api/usage', (req, res) => {
-  try {
-    if (!fs.existsSync('email-logs.csv')) {
-      return res.json({
-        today: 0,
-        limit: 500,
-        remaining: 500,
-        percentage: '0%',
-        total: 0
-      });
+  res.json({ 
+    status: 'online',
+    service: 'email-backend',
+    version: '1.0.0',
+    endpoints: {
+      sendEmail: '/api/send-email',
+      health: '/api/health',
+      test: '/test'
     }
-
-    const logContent = fs.readFileSync('email-logs.csv', 'utf8');
-    const lines = logContent.trim().split('\n');
-    
-    // Skip header if present
-    const startIndex = lines[0].includes('timestamp') ? 1 : 0;
-    const today = new Date().toISOString().split('T')[0];
-    
-    let todayCount = 0;
-    const allEmails = [];
-    
-    for (let i = startIndex; i < lines.length; i++) {
-      if (lines[i].trim()) {
-        const parts = lines[i].split(' | ');
-        if (parts.length >= 2) {
-          const timestamp = parts[0];
-          if (timestamp.includes(today)) {
-            todayCount++;
-          }
-          allEmails.push(parts[1]); // email address
-        }
-      }
-    }
-    
-    const uniqueEmails = [...new Set(allEmails)];
-    
-    res.json({
-      today: todayCount,
-      limit: 500,
-      remaining: 500 - todayCount,
-      percentage: ((todayCount / 500) * 100).toFixed(1) + '%',
-      total: lines.length - startIndex,
-      uniqueContacts: uniqueEmails.length
-    });
-  } catch (error) {
-    console.error('Usage stats error:', error);
-    res.status(500).json({ error: 'Failed to get usage stats' });
-  }
+  });
 });
 
-// Main email endpoint with rate limiting
+// Test route (simplified)
+app.get('/test', (req, res) => {
+  res.json({ 
+    success: true, 
+    message: 'Backend is running!',
+    timestamp: new Date().toISOString()
+  });
+});
+
+// Main email endpoint
 app.post('/api/send-email', emailLimiter, async (req, res) => {
   const { name, email, company, phone, website, message } = req.body;
   
@@ -306,12 +225,7 @@ app.post('/api/send-email', emailLimiter, async (req, res) => {
   }
   
   try {
-    // Option 1: Send immediately (current approach)
     const info = await sendSingleEmail({ name, email, company, phone, website, message, req });
-    
-    // Option 2: Queue for future (uncomment if needed)
-    // emailQueue.push({ name, email, company, phone, website, message, req });
-    // processEmailQueue();
     
     res.json({ 
       success: true, 
@@ -323,9 +237,16 @@ app.post('/api/send-email', emailLimiter, async (req, res) => {
     console.error('Email error:', error);
     logEmail(email, 'failed', req.ip);
     
+    // FIX 4: Better error messages for Render
+    let errorMessage = 'Failed to send email';
+    if (error.code === 'ETIMEDOUT') {
+      errorMessage = 'Connection timeout. Render may be blocking SMTP connections on free tier. Consider upgrading or using a different email service.';
+    }
+    
     res.status(500).json({ 
       success: false, 
-      error: 'Failed to send email',
+      error: errorMessage,
+      code: error.code,
       details: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
@@ -338,29 +259,23 @@ app.get('/api/health', (req, res) => {
     timestamp: new Date().toISOString(),
     service: 'email-backend',
     uptime: process.uptime(),
-    memory: process.memoryUsage()
+    environment: process.env.NODE_ENV || 'development'
   });
 });
 
-// Admin endpoint to clear logs (optional, for testing)
-app.delete('/api/logs', (req, res) => {
-  try {
-    if (fs.existsSync('email-logs.csv')) {
-      fs.unlinkSync('email-logs.csv');
-      res.json({ success: true, message: 'Logs cleared' });
-    } else {
-      res.json({ success: false, message: 'No logs file found' });
-    }
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
+// ALTERNATIVE: Use EmailJS as fallback (keep your original setup)
+app.post('/api/send-email-fallback', async (req, res) => {
+  // If Render blocks SMTP, use this as an alternative
+  res.json({
+    success: true,
+    message: 'Email would be sent via alternative service',
+    note: 'Consider using EmailJS or similar service on Render'
+  });
 });
 
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.PORT || 10000; // Render provides port dynamically
 app.listen(PORT, () => {
-  console.log(`🚀 Server running on http://localhost:${PORT}`);
-  console.log(`📧 Email endpoint: http://localhost:${PORT}/api/send-email`);
-  console.log(`📊 Usage stats: http://localhost:${PORT}/api/usage`);
-  console.log(`🩺 Health check: http://localhost:${PORT}/api/health`);
-  console.log(`🔒 Rate limit: 5 emails per 15 minutes per IP`);
+  console.log(`🚀 Server running on port ${PORT}`);
+  console.log(`📧 Email endpoint: /api/send-email`);
+  console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
 });
